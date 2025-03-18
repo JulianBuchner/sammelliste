@@ -15,7 +15,7 @@ npm run serve
 npm run build
 ```
 
-### Deploy to GitHub Pages after bulding
+### Deploys the dist folder to GitHub Pages
 ```
 npm run deploy
 ```
