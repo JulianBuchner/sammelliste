@@ -124,11 +124,16 @@
         </v-card-actions>
       </v-card>
     </v-dialog>
+
+    <!-- Sync / session hints -->
+    <v-snackbar v-model="snackbar" :timeout="4000">
+      {{ snackbarText }}
+    </v-snackbar>
   </v-app>
 </template>
 
 <script setup>
-import { ref, onMounted, watch } from "vue";
+import { ref, onMounted, onBeforeUnmount, watch } from "vue";
 
 const menu = ref(false);
 const showAddDialog = ref(false);
@@ -138,18 +143,178 @@ const newEntryName = ref("");
 
 const entries = ref([]);
 
-const loadEntries = () => {
-  const stored = localStorage.getItem("sammellisteEntries");
-  if (stored) {
-    entries.value = JSON.parse(stored);
+// --- Persistence: localStorage is the cache, the docstore backend is the source of truth.
+// The hub forwards `${BASE_URL}api/*` to the backend (server/index.ts) with the prefix removed.
+const STORAGE_KEY = "sammellisteEntries";
+const REV_KEY = "sammellisteRev";
+const PENDING_KEY = "sammellistePending";
+const DOC_URL = `${process.env.BASE_URL}api/docs/entries`;
+const SAVE_DEBOUNCE_MS = 800;
+
+let rev = 0; // last revision known from the server (0 = nothing stored yet)
+let pending = false; // local changes not yet confirmed by the server
+let lastSynced = null; // JSON of the entries last confirmed by the server
+let ready = false; // initial server load finished (or failed); saves run only afterwards
+let syncing = false;
+let queued = false;
+let saveTimer = null;
+
+const snackbar = ref(false);
+const snackbarText = ref("");
+const showSnackbar = (text) => {
+  snackbarText.value = text;
+  snackbar.value = true;
+};
+
+const readCache = () => {
+  try {
+    rev = Number(localStorage.getItem(REV_KEY)) || 0;
+    pending = localStorage.getItem(PENDING_KEY) === "1";
+    const stored = localStorage.getItem(STORAGE_KEY);
+    const parsed = stored ? JSON.parse(stored) : null;
+    return Array.isArray(parsed) ? parsed : null;
+  } catch (err) {
+    console.error("sammelliste: cache unreadable, starting empty", err);
+    return null;
   }
 };
 
-const saveEntries = () => {
-  localStorage.setItem("sammellisteEntries", JSON.stringify(entries.value));
+const writeCache = () => {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(entries.value));
+    localStorage.setItem(REV_KEY, String(rev));
+    localStorage.setItem(PENDING_KEY, pending ? "1" : "0");
+  } catch (err) {
+    console.error("sammelliste: cache write failed", err);
+  }
 };
 
-onMounted(loadEntries);
+const goToLogin = () => {
+  showSnackbar("Sitzung abgelaufen, bitte neu einloggen");
+  setTimeout(() => {
+    location.assign(
+      "/login?next=" +
+        encodeURIComponent(location.pathname + location.search + location.hash)
+    );
+  }, 1500);
+};
+
+const adoptServerState = (doc) => {
+  entries.value = Array.isArray(doc.data) ? doc.data : [];
+  rev = doc.rev;
+  lastSynced = JSON.stringify(entries.value);
+  pending = false;
+  writeCache();
+};
+
+const scheduleSave = () => {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(pushToServer, SAVE_DEBOUNCE_MS);
+};
+
+const pushToServer = async () => {
+  const json = JSON.stringify(entries.value);
+  if (json === lastSynced) {
+    pending = false;
+    writeCache();
+    return;
+  }
+  if (syncing) {
+    queued = true;
+    return;
+  }
+  syncing = true;
+  try {
+    const res = await fetch(DOC_URL, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: `{"data":${json},"rev":${rev}}`,
+    });
+    if (res.status === 200) {
+      rev = (await res.json()).rev;
+      lastSynced = json;
+      pending = false;
+      writeCache();
+    } else if (res.status === 409) {
+      adoptServerState(await res.json());
+      showSnackbar("Auf einem anderen Gerät geändert, Liste neu geladen");
+    } else if (res.status === 401) {
+      pending = true;
+      writeCache();
+      goToLogin();
+    } else {
+      pending = true;
+      writeCache();
+      console.error("sammelliste: save failed", res.status);
+      showSnackbar(
+        "Speichern am Server fehlgeschlagen, wird später wiederholt"
+      );
+    }
+  } catch (err) {
+    // offline or server unreachable: keep the local copy, retry later
+    pending = true;
+    writeCache();
+  } finally {
+    syncing = false;
+    if (queued) {
+      queued = false;
+      scheduleSave();
+    }
+  }
+};
+
+const loadFromServer = async () => {
+  try {
+    const res = await fetch(DOC_URL, {
+      headers: { Accept: "application/json" },
+    });
+    if (res.status === 200) {
+      const doc = await res.json();
+      if (pending && rev === doc.rev) {
+        // unsent local changes based on the current server state: push them
+        scheduleSave();
+      } else {
+        if (pending) {
+          showSnackbar("Auf einem anderen Gerät geändert, Liste neu geladen");
+        }
+        adoptServerState(doc);
+      }
+    } else if (res.status === 404) {
+      rev = 0;
+      if (entries.value.length > 0) scheduleSave(); // first upload (e.g. migrated data)
+    } else if (res.status === 401) {
+      goToLogin();
+    } else {
+      console.error("sammelliste: load failed", res.status);
+    }
+  } catch (err) {
+    // offline: keep working with the cache, retry when the connection is back
+    if (pending) scheduleSave();
+  }
+};
+
+const loadEntries = async () => {
+  entries.value = readCache() || [];
+  await loadFromServer();
+  ready = true;
+};
+
+const onOnline = () => {
+  if (!ready) return;
+  if (lastSynced === null) loadFromServer();
+  else if (pending) scheduleSave();
+};
+
+const saveEntries = () => {
+  writeCache();
+  if (ready) scheduleSave();
+};
+
+onMounted(() => {
+  loadEntries();
+  window.addEventListener("online", onOnline);
+});
+onBeforeUnmount(() => window.removeEventListener("online", onOnline));
 watch(entries, saveEntries, { deep: true });
 
 const openAddDialog = () => {
