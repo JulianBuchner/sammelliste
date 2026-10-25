@@ -1,0 +1,6 @@
+# Keep LF in the working tree on every platform; the prettier rule in the build requires LF.
+* text=auto eol=lf
+*.png binary
+*.ico binary
+*.jpg binary
+*.woff2 binary
