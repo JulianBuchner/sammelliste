@@ -21,3 +21,6 @@ pnpm-debug.log*
 *.njsproj
 *.sln
 *.sw?
+
+# per-app SQLite database of the docstore backend (server/)
+/data

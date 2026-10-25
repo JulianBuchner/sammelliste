@@ -6,7 +6,8 @@
     "serve": "vue-cli-service serve",
     "build": "vue-cli-service build",
     "deploy": "gh-pages -d dist",
-    "lint": "vue-cli-service lint"
+    "lint": "vue-cli-service lint",
+    "server": "node server/index.ts"
   },
   "dependencies": {
     "@mdi/font": "5.9.55",
